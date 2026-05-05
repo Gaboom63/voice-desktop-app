@@ -3,13 +3,13 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+// We keep this import so your Cargo.toml doesn't break, but we bypass it for notifications
 use tauri_plugin_notification::NotificationExt;
 
-// --- Command 1: The Background Timer (Generic "Unread Messages" check) ---
+// --- Command 1: Generic Notification (Fallback) ---
 #[tauri::command]
 fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
     if let Some(tray) = app.tray_by_id("main_tray") {
-        // BACK TO NORMAL: Swaps between Red Dot and Normal based on count
         let icon_bytes = if count > 0 {
             include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice()
         } else {
@@ -25,18 +25,22 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
     }
 
     if notify {
-        let _ = app.notification()
-            .builder()
-            .title("Google Voice")
-            .body(format!("You have {} unread message(s)", count))
-            .show();
+        // BYPASS TAURI: Talk directly to Fedora/XFCE
+        #[cfg(target_os = "linux")]
+        let _ = std::process::Command::new("notify-send")
+            .arg("-a")
+            .arg("Google Voice")
+            .arg("-i")
+            .arg("dialog-information") // Uses standard native icon
+            .arg("Google Voice")
+            .arg(format!("You have {} unread message(s)", count))
+            .spawn();
     }
 }
 
-// --- Command 2: The Rich Notification (Contact Name + Exact Message) ---
+// --- Command 2: Rich Notification (Contact Name + Exact Message) ---
 #[tauri::command]
 fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String) {
-    // Force the red dot ON when a rich notification arrives
     if let Some(tray) = app.tray_by_id("main_tray") {
         let icon_bytes = include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice();
         if let Ok(img) = image::load_from_memory(icon_bytes) {
@@ -47,12 +51,16 @@ fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String)
         }
     }
 
-    // Fire the native Linux notification with the specific name and text
-    let _ = app.notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show();
+    // BYPASS TAURI: Talk directly to Fedora/XFCE
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("notify-send")
+        .arg("-a")
+        .arg("Google Voice")
+        .arg("-i")
+        .arg("dialog-information")
+        .arg(&title)
+        .arg(&body)
+        .spawn();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -90,7 +98,12 @@ pub fn run() {
                     });
                 });
 
-                const mockNotification = function(title, options) {
+                // Debounce timer to prevent double-notifications
+                let lastRichNotify = 0;
+
+                const OldNotification = window.Notification;
+                window.Notification = function(title, options) {
+                    lastRichNotify = Date.now();
                     window.__TAURI_INTERNALS__.invoke("trigger_rich_notification", {
                         title: title || "New Message",
                         body: options ? (options.body || "") : ""
@@ -104,18 +117,9 @@ pub fn run() {
                         dispatchEvent: function() { return true; }
                     };
                 };
-                mockNotification.permission = "granted";
-                mockNotification.requestPermission = async function() { return "granted"; };
-
-                try { 
-                    window.Notification = mockNotification; 
-                } catch (e) {
-                    Object.defineProperty(window, 'Notification', {
-                        value: mockNotification, 
-                        writable: true, 
-                        configurable: true
-                    });
-                }
+                window.Notification.prototype = OldNotification ? OldNotification.prototype : Object.prototype;
+                window.Notification.permission = "granted";
+                window.Notification.requestPermission = async function() { return "granted"; };
 
                 let lastCount = 0;
                 setInterval(() => {
@@ -123,9 +127,12 @@ pub fn run() {
                     let count = match ? parseInt(match[1]) : 0;
                     
                     if (count !== lastCount) {
+                        // Only trigger generic popup if the rich notification didn't fire recently
+                        let shouldNotify = (count > lastCount) && (Date.now() - lastRichNotify > 3000);
+                        
                         window.__TAURI_INTERNALS__.invoke("update_status", { 
                             count: count,
-                            notify: false 
+                            notify: shouldNotify 
                         });
                     }
                     lastCount = count;
@@ -148,7 +155,6 @@ pub fn run() {
 
             let mut tray_builder = TrayIconBuilder::with_id("main_tray").menu(&menu);
             
-            // Startup with the Normal tray icon
             let default_icon_bytes = include_bytes!("../icons/Google-Voice-Normal-Icon.png").as_slice();
             if let Ok(img) = image::load_from_memory(default_icon_bytes) {
                 let rgba = img.into_rgba8();
