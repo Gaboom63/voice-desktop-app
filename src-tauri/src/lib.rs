@@ -28,6 +28,7 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
     // 2. Trigger the Native XFCE Notification from Rust
     if notify {
         let _ = app.notification()
+            .builder()
             .title("Google Voice")
             .body(format!("You have {} unread message(s)", count))
             .show();
