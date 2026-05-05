@@ -1,0 +1,10 @@
+"windows": [
+  {
+    "title": "Google Voice",
+    "width": 1100,
+    "height": 750,
+    "url": "https://voice.google.com",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "initializationScript": "../scripts/fix.js"
+  }
+]
