@@ -4,21 +4,23 @@ use tauri::{
     Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
-// --- NEW: Custom command to swap the tray icon ---
+// --- NEW: Custom command to swap the tray icon using RGBA decoding ---
 #[tauri::command]
 fn set_tray_status(app: tauri::AppHandle, has_unread: bool) {
-    // Find the tray by the ID we give it below ("main_tray")
     if let Some(tray) = app.tray_by_id("main_tray") {
-        // Load the bytes of the specific image
         let icon_bytes = if has_unread {
             include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice()
         } else {
             include_bytes!("../icons/Google-Voice-Normal-Icon.png").as_slice()
         };
 
-        // Convert the bytes to a Tauri Image and apply it
-        if let Ok(image) = tauri::image::Image::from_bytes(icon_bytes) {
-            let _ = tray.set_icon(Some(image));
+        // Decode the PNG into raw RGBA pixels
+        if let Ok(img) = image::load_from_memory(icon_bytes) {
+            let rgba = img.into_rgba8();
+            let (width, height) = rgba.dimensions();
+            // Pass the raw pixels to Tauri v2's expected format
+            let icon = tauri::image::Image::new_owned(rgba.into_raw(), width, height);
+            let _ = tray.set_icon(Some(icon));
         }
     }
 }
@@ -32,7 +34,6 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        // Register our new command so JS can call it
         .invoke_handler(tauri::generate_handler![set_tray_status])
         .setup(|app| {
             let window = WebviewWindowBuilder::new(
@@ -44,7 +45,6 @@ pub fn run() {
             .inner_size(1100.0, 750.0)
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             .initialization_script(r#"
-                // 1. Popup Sign-In Fix
                 window.open = function(url, name, specs) {
                     window.location.href = url;
                     return window; 
@@ -60,20 +60,17 @@ pub fn run() {
                     });
                 });
 
-                // 2. Notification & Tray Icon Watcher
                 let lastCount = 0;
                 setInterval(() => {
                     let match = document.title.match(/\((\d+)\)/);
                     let count = match ? parseInt(match[1]) : 0;
                     
-                    // If the count changed at all (up or down), update the tray icon
                     if (count !== lastCount) {
                         window.__TAURI_INTERNALS__.invoke("set_tray_status", { 
                             hasUnread: count > 0 
                         });
                     }
 
-                    // If the count specifically went UP, trigger a pop-up notification
                     if (count > lastCount) {
                         window.__TAURI_INTERNALS__.invoke("plugin:notification|notify", {
                             options: {
@@ -87,7 +84,6 @@ pub fn run() {
             "#)
             .build()?;
 
-            // Keep alive in background
             let window_clone = window.clone();
             window.on_window_event(move |event| match event {
                 WindowEvent::CloseRequested { api, .. } => {
@@ -97,17 +93,18 @@ pub fn run() {
                 _ => {}
             });
 
-            // Setup the System Tray Menu
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show Google Voice", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
-            // --- NEW: We use "with_id" here so we can find it later to swap the icon ---
             let mut tray_builder = TrayIconBuilder::with_id("main_tray").menu(&menu);
             
-            // Set the default normal icon on startup
+            // Set the default normal icon on startup by decoding the PNG
             let default_icon_bytes = include_bytes!("../icons/Google-Voice-Normal-Icon.png").as_slice();
-            if let Ok(default_image) = tauri::image::Image::from_bytes(default_icon_bytes) {
+            if let Ok(img) = image::load_from_memory(default_icon_bytes) {
+                let rgba = img.into_rgba8();
+                let (width, height) = rgba.dimensions();
+                let default_image = tauri::image::Image::new_owned(rgba.into_raw(), width, height);
                 tray_builder = tray_builder.icon(default_image);
             }
 
