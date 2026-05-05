@@ -1,24 +1,41 @@
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WebviewUrl, WebviewWindowBuilder,
+    Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+
+// --- NEW: Custom command to swap the tray icon ---
+#[tauri::command]
+fn set_tray_status(app: tauri::AppHandle, has_unread: bool) {
+    // Find the tray by the ID we give it below ("main_tray")
+    if let Some(tray) = app.tray_by_id("main_tray") {
+        // Load the bytes of the specific image
+        let icon_bytes = if has_unread {
+            include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice()
+        } else {
+            include_bytes!("../icons/Google-Voice-Normal-Icon.png").as_slice()
+        };
+
+        // Convert the bytes to a Tauri Image and apply it
+        if let Ok(image) = tauri::image::Image::from_bytes(icon_bytes) {
+            let _ = tray.set_icon(Some(image));
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // FIX: Programmatically disable hardware compositing on Linux 
-    // to prevent the EGL_BAD_PARAMETER crash on Intel/Mesa drivers.
     #[cfg(target_os = "linux")]
     {
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-        // Optional: Some Intel chips also need this to prevent flickering
-        // std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        // Register our new command so JS can call it
+        .invoke_handler(tauri::generate_handler![set_tray_status])
         .setup(|app| {
-            // 1. Build the window manually so we can inject the Popup Killer script
-            let _window = WebviewWindowBuilder::new(
+            let window = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External(tauri::Url::parse("https://voice.google.com").unwrap())
@@ -27,13 +44,12 @@ pub fn run() {
             .inner_size(1100.0, 750.0)
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             .initialization_script(r#"
-                // Overwrite the popup command to load in the same window
+                // 1. Popup Sign-In Fix
                 window.open = function(url, name, specs) {
                     window.location.href = url;
                     return window; 
                 };
                 
-                // Catch any links that try to force open a new tab
                 window.addEventListener('DOMContentLoaded', () => {
                     document.body.addEventListener('click', (e) => {
                         let a = e.target.closest('a');
@@ -43,19 +59,56 @@ pub fn run() {
                         }
                     });
                 });
+
+                // 2. Notification & Tray Icon Watcher
+                let lastCount = 0;
+                setInterval(() => {
+                    let match = document.title.match(/\((\d+)\)/);
+                    let count = match ? parseInt(match[1]) : 0;
+                    
+                    // If the count changed at all (up or down), update the tray icon
+                    if (count !== lastCount) {
+                        window.__TAURI_INTERNALS__.invoke("set_tray_status", { 
+                            hasUnread: count > 0 
+                        });
+                    }
+
+                    // If the count specifically went UP, trigger a pop-up notification
+                    if (count > lastCount) {
+                        window.__TAURI_INTERNALS__.invoke("plugin:notification|notify", {
+                            options: {
+                                title: "Google Voice",
+                                body: `You have ${count} unread message(s)`
+                            }
+                        });
+                    }
+                    lastCount = count;
+                }, 2000);
             "#)
             .build()?;
 
-            // 2. Setup the System Tray Menu
+            // Keep alive in background
+            let window_clone = window.clone();
+            window.on_window_event(move |event| match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window_clone.hide();
+                }
+                _ => {}
+            });
+
+            // Setup the System Tray Menu
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show Google Voice", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
-            // 3. Build the Tray Icon safely
-            let mut tray_builder = TrayIconBuilder::new().menu(&menu);
+            // --- NEW: We use "with_id" here so we can find it later to swap the icon ---
+            let mut tray_builder = TrayIconBuilder::with_id("main_tray").menu(&menu);
             
-            if let Some(icon) = app.default_window_icon() {
-                tray_builder = tray_builder.icon(icon.clone());
+            // Set the default normal icon on startup
+            let default_icon_bytes = include_bytes!("../icons/Google-Voice-Normal-Icon.png").as_slice();
+            if let Ok(default_image) = tauri::image::Image::from_bytes(default_icon_bytes) {
+                tray_builder = tray_builder.icon(default_image);
             }
 
             let _tray = tray_builder
@@ -78,8 +131,12 @@ pub fn run() {
                     {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
                         }
                     }
                 })
