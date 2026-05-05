@@ -5,7 +5,7 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 
-// --- Custom command to swap the tray icon using RGBA decoding ---
+// --- Custom command to swap the tray icon AND trigger XFCE notifications ---
 #[tauri::command]
 fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
     // 1. Swap the Tray Icon
@@ -24,10 +24,10 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
         }
     }
 
-    // 2. Trigger a generic Notification (Only if requested)
+    // 2. Trigger the Native XFCE Notification
     if notify {
         let _ = app.notification()
-            .builder() // The missing link!
+            .builder() 
             .title("Google Voice")
             .body(format!("You have {} unread message(s)", count))
             .show();
@@ -36,7 +36,6 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Prevent the EGL_BAD_PARAMETER crash on Intel/Mesa drivers
     #[cfg(target_os = "linux")]
     {
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
@@ -55,7 +54,7 @@ pub fn run() {
             .inner_size(1100.0, 750.0)
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             .initialization_script(r#"
-                // 1. Popup Sign-In Fix & Force external links to open in current window
+                // 1. Popup Sign-In Fix
                 window.open = function(url, name, specs) {
                     window.location.href = url;
                     return window; 
@@ -71,39 +70,17 @@ pub fn run() {
                     });
                 });
 
-                // 2. HIJACK NATIVE WEB NOTIFICATIONS (Rich Notifications)
-                window.Notification.permission = "granted";
-                window.Notification.requestPermission = async function() { return "granted"; };
-                
-                window.Notification = function(title, options) {
-                    // Send the exact Contact Name (title) and Message (body) to Fedora
-                    window.__TAURI_INTERNALS__.invoke("plugin:notification|notify", {
-                        options: {
-                            title: title, 
-                            body: options ? options.body : '' 
-                        }
-                    });
-                    
-                    // Return a dummy object so Google Voice doesn't crash
-                    return {
-                        onclick: null,
-                        close: function() {},
-                        addEventListener: function() {}
-                    };
-                };
-
-                // 3. Tray Icon Red Dot Watcher
+                // 2. Safe Watcher (No aggressive web-hijacking)
                 let lastCount = 0;
                 setInterval(() => {
                     let match = document.title.match(/\((\d+)\)/);
                     let count = match ? parseInt(match[1]) : 0;
                     
                     if (count !== lastCount) {
-                        // Tell Rust to swap the tray icon
-                        // notify is false because the Rich Notification hijack handles the popup
+                        // Tell Rust to update the tray, and ONLY notify if the count went UP
                         window.__TAURI_INTERNALS__.invoke("update_status", { 
                             count: count,
-                            notify: false 
+                            notify: count > lastCount 
                         });
                     }
                     lastCount = count;
@@ -111,7 +88,6 @@ pub fn run() {
             "#)
             .build()?;
 
-            // --- KEEP ALIVE IN BACKGROUND ---
             let window_clone = window.clone();
             window.on_window_event(move |event| match event {
                 WindowEvent::CloseRequested { api, .. } => {
@@ -121,14 +97,12 @@ pub fn run() {
                 _ => {}
             });
 
-            // --- SYSTEM TRAY SETUP ---
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show Google Voice", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
             let mut tray_builder = TrayIconBuilder::with_id("main_tray").menu(&menu);
             
-            // Decode the default PNG on startup
             let default_icon_bytes = include_bytes!("../icons/Google-Voice-Normal-Icon.png").as_slice();
             if let Ok(img) = image::load_from_memory(default_icon_bytes) {
                 let rgba = img.into_rgba8();
