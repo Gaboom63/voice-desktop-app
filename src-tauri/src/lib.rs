@@ -5,11 +5,11 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 
-// --- Custom command to swap the tray icon AND trigger XFCE notifications ---
+// --- Command 1: The Background Timer (Generic "Unread Messages" check) ---
 #[tauri::command]
 fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
-    // 1. Swap the Tray Icon
     if let Some(tray) = app.tray_by_id("main_tray") {
+        // BACK TO NORMAL: Swaps between Red Dot and Normal based on count
         let icon_bytes = if count > 0 {
             include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice()
         } else {
@@ -24,14 +24,35 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
         }
     }
 
-    // 2. Trigger the Native XFCE Notification
     if notify {
         let _ = app.notification()
-            .builder() 
+            .builder()
             .title("Google Voice")
             .body(format!("You have {} unread message(s)", count))
             .show();
     }
+}
+
+// --- Command 2: The Rich Notification (Contact Name + Exact Message) ---
+#[tauri::command]
+fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String) {
+    // Force the red dot ON when a rich notification arrives
+    if let Some(tray) = app.tray_by_id("main_tray") {
+        let icon_bytes = include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice();
+        if let Ok(img) = image::load_from_memory(icon_bytes) {
+            let rgba = img.into_rgba8();
+            let (width, height) = rgba.dimensions();
+            let icon = tauri::image::Image::new_owned(rgba.into_raw(), width, height);
+            let _ = tray.set_icon(Some(icon));
+        }
+    }
+
+    // Fire the native Linux notification with the specific name and text
+    let _ = app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -43,7 +64,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![update_status])
+        .invoke_handler(tauri::generate_handler![update_status, trigger_rich_notification])
         .setup(|app| {
             let window = WebviewWindowBuilder::new(
                 app,
@@ -54,7 +75,6 @@ pub fn run() {
             .inner_size(1100.0, 750.0)
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             .initialization_script(r#"
-                // 1. Popup Sign-In Fix
                 window.open = function(url, name, specs) {
                     window.location.href = url;
                     return window; 
@@ -70,17 +90,42 @@ pub fn run() {
                     });
                 });
 
-                // 2. Safe Watcher (No aggressive web-hijacking)
+                const mockNotification = function(title, options) {
+                    window.__TAURI_INTERNALS__.invoke("trigger_rich_notification", {
+                        title: title || "New Message",
+                        body: options ? (options.body || "") : ""
+                    });
+                    
+                    return {
+                        onclick: null,
+                        close: function() {},
+                        addEventListener: function() {},
+                        removeEventListener: function() {},
+                        dispatchEvent: function() { return true; }
+                    };
+                };
+                mockNotification.permission = "granted";
+                mockNotification.requestPermission = async function() { return "granted"; };
+
+                try { 
+                    window.Notification = mockNotification; 
+                } catch (e) {
+                    Object.defineProperty(window, 'Notification', {
+                        value: mockNotification, 
+                        writable: true, 
+                        configurable: true
+                    });
+                }
+
                 let lastCount = 0;
                 setInterval(() => {
                     let match = document.title.match(/\((\d+)\)/);
                     let count = match ? parseInt(match[1]) : 0;
                     
                     if (count !== lastCount) {
-                        // Tell Rust to update the tray, and ONLY notify if the count went UP
                         window.__TAURI_INTERNALS__.invoke("update_status", { 
                             count: count,
-                            notify: count > lastCount 
+                            notify: false 
                         });
                     }
                     lastCount = count;
@@ -103,6 +148,7 @@ pub fn run() {
 
             let mut tray_builder = TrayIconBuilder::with_id("main_tray").menu(&menu);
             
+            // Startup with the Normal tray icon
             let default_icon_bytes = include_bytes!("../icons/Google-Voice-Normal-Icon.png").as_slice();
             if let Ok(img) = image::load_from_memory(default_icon_bytes) {
                 let rgba = img.into_rgba8();
