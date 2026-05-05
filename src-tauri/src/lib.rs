@@ -1,7 +1,7 @@
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WebviewUrl,
+    Manager,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -44,17 +44,6 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-
-            // 3. Handle Navigation and "New Window" requests
-            // In Tauri 2.0, we can use the window's navigation handler
-            if let Some(window) = app.get_webview_window("main") {
-                let window_clone = window.clone();
-                window.on_navigation(move |url| {
-                    // This allows the main window to follow redirects (like Sign-in)
-                    // and prevents them from being blocked.
-                    true 
-                });
-            }
 
             Ok(())
         })
