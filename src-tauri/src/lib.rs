@@ -3,25 +3,34 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+// --- NEW: Import the Rust Notification Trait ---
+use tauri_plugin_notification::NotificationExt;
 
-// --- NEW: Custom command to swap the tray icon using RGBA decoding ---
+// --- UPDATED: One command to handle both the Tray Icon AND the Notification ---
 #[tauri::command]
-fn set_tray_status(app: tauri::AppHandle, has_unread: bool) {
+fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
+    // 1. Swap the Tray Icon
     if let Some(tray) = app.tray_by_id("main_tray") {
-        let icon_bytes = if has_unread {
+        let icon_bytes = if count > 0 {
             include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice()
         } else {
             include_bytes!("../icons/Google-Voice-Normal-Icon.png").as_slice()
         };
 
-        // Decode the PNG into raw RGBA pixels
         if let Ok(img) = image::load_from_memory(icon_bytes) {
             let rgba = img.into_rgba8();
             let (width, height) = rgba.dimensions();
-            // Pass the raw pixels to Tauri v2's expected format
             let icon = tauri::image::Image::new_owned(rgba.into_raw(), width, height);
             let _ = tray.set_icon(Some(icon));
         }
+    }
+
+    // 2. Trigger the Native XFCE Notification from Rust
+    if notify {
+        let _ = app.notification()
+            .title("Google Voice")
+            .body(format!("You have {} unread message(s)", count))
+            .show();
     }
 }
 
@@ -34,7 +43,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![set_tray_status])
+        // Register the new combined command
+        .invoke_handler(tauri::generate_handler![update_status])
         .setup(|app| {
             let window = WebviewWindowBuilder::new(
                 app,
@@ -45,6 +55,7 @@ pub fn run() {
             .inner_size(1100.0, 750.0)
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             .initialization_script(r#"
+                // 1. Popup Sign-In Fix
                 window.open = function(url, name, specs) {
                     window.location.href = url;
                     return window; 
@@ -60,23 +71,17 @@ pub fn run() {
                     });
                 });
 
+                // 2. The Simplified Watcher
                 let lastCount = 0;
                 setInterval(() => {
                     let match = document.title.match(/\((\d+)\)/);
                     let count = match ? parseInt(match[1]) : 0;
                     
+                    // If the count changed, tell Rust to handle EVERYTHING
                     if (count !== lastCount) {
-                        window.__TAURI_INTERNALS__.invoke("set_tray_status", { 
-                            hasUnread: count > 0 
-                        });
-                    }
-
-                    if (count > lastCount) {
-                        window.__TAURI_INTERNALS__.invoke("plugin:notification|notify", {
-                            options: {
-                                title: "Google Voice",
-                                body: `You have ${count} unread message(s)`
-                            }
+                        window.__TAURI_INTERNALS__.invoke("update_status", { 
+                            count: count,
+                            notify: count > lastCount // Only pop a notification if the number went UP
                         });
                     }
                     lastCount = count;
@@ -99,7 +104,6 @@ pub fn run() {
 
             let mut tray_builder = TrayIconBuilder::with_id("main_tray").menu(&menu);
             
-            // Set the default normal icon on startup by decoding the PNG
             let default_icon_bytes = include_bytes!("../icons/Google-Voice-Normal-Icon.png").as_slice();
             if let Ok(img) = image::load_from_memory(default_icon_bytes) {
                 let rgba = img.into_rgba8();
