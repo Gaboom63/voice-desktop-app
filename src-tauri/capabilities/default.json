@@ -5,6 +5,9 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "event:default",
+    "window:default",
+    "tray:default",
+    "webview:allow-create-webview-window" 
   ]
 }
