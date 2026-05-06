@@ -94,7 +94,7 @@ pub fn run() {
                 });
 
                 // --- THE MAGIC BULLET ---
-                // 1. Nuke Service Workers so GV falls back to standard Web Notifications
+                // 1. Nuke Service Workers so GV falls back entirely
                 if ('serviceWorker' in navigator) {
                     try {
                         Object.defineProperty(navigator, 'serviceWorker', { 
@@ -104,46 +104,57 @@ pub fn run() {
                     } catch(e) {}
                 }
 
-                // 2. Safely hijack the Web Notification class
-                let lastRichNotify = 0;
-
-                class FakeNotification {
-                    constructor(title, options) {
-                        lastRichNotify = Date.now();
-                        window.__TAURI_INTERNALS__.invoke("trigger_rich_notification", {
-                            title: title ? title.toString() : "New Message",
-                            body: (options && options.body) ? options.body.toString() : ""
-                        });
-                    }
-                    static get permission() { return "granted"; }
-                    static requestPermission() { return Promise.resolve("granted"); }
-                }
-
-                // Force WebKit to accept our fake notification object
-                try {
-                    window.Notification = FakeNotification;
-                } catch (e) {
-                    Object.defineProperty(window, 'Notification', {
-                        value: FakeNotification,
-                        writable: true,
-                        configurable: true
-                    });
-                }
-
+                // 2. The DOM Scraper & Notification Trigger
                 let lastCount = 0;
+                
                 setInterval(() => {
                     let match = document.title.match(/\((\d+)\)/);
                     let count = match ? parseInt(match[1]) : 0;
                     
-                    if (count !== lastCount) {
-                        // Only fallback to generic popup if rich notification failed to fire
-                        let shouldNotify = (count > lastCount) && (Date.now() - lastRichNotify > 3000);
-                        
+                    // If the count increased, a NEW message arrived
+                    if (count > lastCount) {
+                        let senderName = "Google Voice";
+                        let messageText = "You have a new message.";
+
+                        try {
+                            // Find all message thread containers
+                            let threads = Array.from(document.querySelectorAll('.thread-details'));
+                            
+                            // Find the first one that contains the hidden "Unread" text
+                            let unreadThread = threads.find(t => t.textContent.includes('Unread'));
+                            
+                            if (unreadThread) {
+                                let nameEl = unreadThread.querySelector('.participants');
+                                let previewEl = unreadThread.querySelector('.preview');
+                                
+                                if (nameEl) senderName = nameEl.textContent.trim();
+                                if (previewEl) messageText = previewEl.textContent.trim();
+                            }
+                        } catch (e) {
+                            console.error("DOM Scrape Error: ", e);
+                        }
+
+                        // Fire the rich notification with the scraped Name and Message
+                        window.__TAURI_INTERNALS__.invoke("trigger_rich_notification", {
+                            title: senderName,
+                            body: messageText
+                        });
+
+                        // Update the tray icon (but tell Rust NOT to fire the fallback notify-send)
                         window.__TAURI_INTERNALS__.invoke("update_status", { 
                             count: count,
-                            notify: shouldNotify 
+                            notify: false 
+                        });
+                        
+                    } else if (count !== lastCount) {
+                        // The count went down (messages were read) or changed without increasing.
+                        // Just update the tray icon, no notification needed.
+                        window.__TAURI_INTERNALS__.invoke("update_status", { 
+                            count: count,
+                            notify: false 
                         });
                     }
+                    
                     lastCount = count;
                 }, 2000);
             "#)
