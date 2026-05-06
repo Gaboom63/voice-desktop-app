@@ -36,10 +36,11 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
 }
 
 #[tauri::command]
-fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String) {
+fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String, icon_bytes: Option<Vec<u8>>) {
+    // 1. Update the tray icon
     if let Some(tray) = app.tray_by_id("main_tray") {
-        let icon_bytes = include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice();
-        if let Ok(img) = image::load_from_memory(icon_bytes) {
+        let default_icon_bytes = include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice();
+        if let Ok(img) = image::load_from_memory(default_icon_bytes) {
             let rgba = img.into_rgba8();
             let (width, height) = rgba.dimensions();
             let icon = tauri::image::Image::new_owned(rgba.into_raw(), width, height);
@@ -48,14 +49,36 @@ fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String)
     }
 
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("notify-send")
-        .arg("-a")
-        .arg("Google Voice")
-        .arg("-i")
-        .arg("dialog-information")
-        .arg(&title)
-        .arg(&body)
-        .spawn();
+    {
+        // 2. Default to generic icon
+        let mut icon_path = String::from("dialog-information");
+
+        // 3. If we received image bytes from JavaScript, save them to a temporary file
+        if let Some(bytes) = icon_bytes {
+            // Create a unique timestamped filename so notify-send doesn't cache an old avatar
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+                
+            let temp_path = std::env::temp_dir().join(format!("gv_avatar_{}.png", timestamp));
+            
+            if std::fs::write(&temp_path, bytes).is_ok() {
+                // If save was successful, use this file for the notification icon
+                icon_path = temp_path.to_string_lossy().into_owned();
+            }
+        }
+
+        // 4. Fire the notification
+        let _ = std::process::Command::new("notify-send")
+            .arg("-a")
+            .arg("Google Voice")
+            .arg("-i")
+            .arg(icon_path)
+            .arg(&title)
+            .arg(&body)
+            .spawn();
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -93,8 +116,6 @@ pub fn run() {
                     });
                 });
 
-                // --- THE MAGIC BULLET ---
-                // 1. Nuke Service Workers so GV falls back entirely
                 if ('serviceWorker' in navigator) {
                     try {
                         Object.defineProperty(navigator, 'serviceWorker', { 
@@ -104,51 +125,67 @@ pub fn run() {
                     } catch(e) {}
                 }
 
-                // 2. The DOM Scraper & Notification Trigger
                 let lastCount = 0;
                 
-                setInterval(() => {
+                // Note: We made this callback async so we can fetch the image
+                setInterval(async () => {
                     let match = document.title.match(/\((\d+)\)/);
                     let count = match ? parseInt(match[1]) : 0;
                     
-                    // If the count increased, a NEW message arrived
                     if (count > lastCount) {
                         let senderName = "Google Voice";
                         let messageText = "You have a new message.";
+                        let avatarUrl = null;
 
                         try {
-                            // Find all message thread containers
                             let threads = Array.from(document.querySelectorAll('.thread-details'));
-                            
-                            // Find the first one that contains the hidden "Unread" text
                             let unreadThread = threads.find(t => t.textContent.includes('Unread'));
                             
                             if (unreadThread) {
+                                // Extract Name & Message
                                 let nameEl = unreadThread.querySelector('.participants');
                                 let previewEl = unreadThread.querySelector('.preview');
                                 
                                 if (nameEl) senderName = nameEl.textContent.trim();
                                 if (previewEl) messageText = previewEl.textContent.trim();
+
+                                // Extract Avatar URL by looking at the parent container
+                                let parentRow = unreadThread.parentElement;
+                                if (parentRow) {
+                                    let imgEl = parentRow.querySelector('img');
+                                    if (imgEl && imgEl.src && !imgEl.src.includes('data:')) {
+                                        avatarUrl = imgEl.src;
+                                    }
+                                }
                             }
                         } catch (e) {
                             console.error("DOM Scrape Error: ", e);
                         }
 
-                        // Fire the rich notification with the scraped Name and Message
+                        // If we found a URL, download it into a byte array
+                        let iconBytesArray = null;
+                        if (avatarUrl) {
+                            try {
+                                let response = await fetch(avatarUrl);
+                                let arrayBuffer = await response.arrayBuffer();
+                                iconBytesArray = Array.from(new Uint8Array(arrayBuffer));
+                            } catch (e) {
+                                console.error("Avatar fetch error: ", e);
+                            }
+                        }
+
                         window.__TAURI_INTERNALS__.invoke("trigger_rich_notification", {
                             title: senderName,
-                            body: messageText
+                            body: messageText,
+                            icon_bytes: iconBytesArray
                         });
 
-                        // Update the tray icon (but tell Rust NOT to fire the fallback notify-send)
                         window.__TAURI_INTERNALS__.invoke("update_status", { 
                             count: count,
                             notify: false 
                         });
                         
                     } else if (count !== lastCount) {
-                        // The count went down (messages were read) or changed without increasing.
-                        // Just update the tray icon, no notification needed.
                         window.__TAURI_INTERNALS__.invoke("update_status", { 
                             count: count,
                             notify: false 
