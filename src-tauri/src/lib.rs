@@ -3,10 +3,8 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
-// We keep this import so your Cargo.toml doesn't break, but we bypass it for notifications
 use tauri_plugin_notification::NotificationExt;
 
-// --- Command 1: Generic Notification (Fallback) ---
 #[tauri::command]
 fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
     if let Some(tray) = app.tray_by_id("main_tray") {
@@ -25,20 +23,18 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
     }
 
     if notify {
-        // BYPASS TAURI: Talk directly to Fedora/XFCE
         #[cfg(target_os = "linux")]
         let _ = std::process::Command::new("notify-send")
             .arg("-a")
             .arg("Google Voice")
             .arg("-i")
-            .arg("dialog-information") // Uses standard native icon
+            .arg("dialog-information") 
             .arg("Google Voice")
             .arg(format!("You have {} unread message(s)", count))
             .spawn();
     }
 }
 
-// --- Command 2: Rich Notification (Contact Name + Exact Message) ---
 #[tauri::command]
 fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String) {
     if let Some(tray) = app.tray_by_id("main_tray") {
@@ -51,7 +47,6 @@ fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String)
         }
     }
 
-    // BYPASS TAURI: Talk directly to Fedora/XFCE
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("notify-send")
         .arg("-a")
@@ -98,28 +93,42 @@ pub fn run() {
                     });
                 });
 
-                // Debounce timer to prevent double-notifications
+                // --- THE MAGIC BULLET ---
+                // 1. Nuke Service Workers so GV falls back to standard Web Notifications
+                if ('serviceWorker' in navigator) {
+                    try {
+                        Object.defineProperty(navigator, 'serviceWorker', { 
+                            value: undefined, 
+                            configurable: true 
+                        });
+                    } catch(e) {}
+                }
+
+                // 2. Safely hijack the Web Notification class
                 let lastRichNotify = 0;
 
-                const OldNotification = window.Notification;
-                window.Notification = function(title, options) {
-                    lastRichNotify = Date.now();
-                    window.__TAURI_INTERNALS__.invoke("trigger_rich_notification", {
-                        title: title || "New Message",
-                        body: options ? (options.body || "") : ""
+                class FakeNotification {
+                    constructor(title, options) {
+                        lastRichNotify = Date.now();
+                        window.__TAURI_INTERNALS__.invoke("trigger_rich_notification", {
+                            title: title ? title.toString() : "New Message",
+                            body: (options && options.body) ? options.body.toString() : ""
+                        });
+                    }
+                    static get permission() { return "granted"; }
+                    static requestPermission() { return Promise.resolve("granted"); }
+                }
+
+                // Force WebKit to accept our fake notification object
+                try {
+                    window.Notification = FakeNotification;
+                } catch (e) {
+                    Object.defineProperty(window, 'Notification', {
+                        value: FakeNotification,
+                        writable: true,
+                        configurable: true
                     });
-                    
-                    return {
-                        onclick: null,
-                        close: function() {},
-                        addEventListener: function() {},
-                        removeEventListener: function() {},
-                        dispatchEvent: function() { return true; }
-                    };
-                };
-                window.Notification.prototype = OldNotification ? OldNotification.prototype : Object.prototype;
-                window.Notification.permission = "granted";
-                window.Notification.requestPermission = async function() { return "granted"; };
+                }
 
                 let lastCount = 0;
                 setInterval(() => {
@@ -127,7 +136,7 @@ pub fn run() {
                     let count = match ? parseInt(match[1]) : 0;
                     
                     if (count !== lastCount) {
-                        // Only trigger generic popup if the rich notification didn't fire recently
+                        // Only fallback to generic popup if rich notification failed to fire
                         let shouldNotify = (count > lastCount) && (Date.now() - lastRichNotify > 3000);
                         
                         window.__TAURI_INTERNALS__.invoke("update_status", { 
