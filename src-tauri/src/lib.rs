@@ -5,6 +5,14 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 
+// Helper function to extract our embedded icon to disk so notify-send can use it
+fn get_default_icon_path() -> String {
+    let path = std::env::temp_dir().join("gv_default_notify_icon.png");
+    // Write the embedded icon to /tmp/ silently
+    let _ = std::fs::write(&path, include_bytes!("../icons/Google-Voice-Notifcation-Icon.png"));
+    path.to_string_lossy().into_owned()
+}
+
 #[tauri::command]
 fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
     if let Some(tray) = app.tray_by_id("main_tray") {
@@ -28,7 +36,7 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
             .arg("-a")
             .arg("Google Voice")
             .arg("-i")
-            .arg("dialog-information") 
+            .arg(get_default_icon_path()) // <-- No more "dialog-information"
             .arg("Google Voice")
             .arg(format!("You have {} unread message(s)", count))
             .spawn();
@@ -50,12 +58,11 @@ fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String,
 
     #[cfg(target_os = "linux")]
     {
-        // 2. Default to generic icon
-        let mut icon_path = String::from("dialog-information");
+        // 2. Default to our custom extracted Google Voice icon
+        let mut icon_path = get_default_icon_path(); 
 
-        // 3. If we received image bytes from JavaScript, save them to a temporary file
+        // 3. If we received avatar bytes from JS, save them to a temp file and override the icon path
         if let Some(bytes) = icon_bytes {
-            // Create a unique timestamped filename so notify-send doesn't cache an old avatar
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -64,7 +71,6 @@ fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String,
             let temp_path = std::env::temp_dir().join(format!("gv_avatar_{}.png", timestamp));
             
             if std::fs::write(&temp_path, bytes).is_ok() {
-                // If save was successful, use this file for the notification icon
                 icon_path = temp_path.to_string_lossy().into_owned();
             }
         }
@@ -127,7 +133,6 @@ pub fn run() {
 
                 let lastCount = 0;
                 
-                // Note: We made this callback async so we can fetch the image
                 setInterval(async () => {
                     let match = document.title.match(/\((\d+)\)/);
                     let count = match ? parseInt(match[1]) : 0;
@@ -142,19 +147,18 @@ pub fn run() {
                             let unreadThread = threads.find(t => t.textContent.includes('Unread'));
                             
                             if (unreadThread) {
-                                // Extract Name & Message
                                 let nameEl = unreadThread.querySelector('.participants');
                                 let previewEl = unreadThread.querySelector('.preview');
                                 
                                 if (nameEl) senderName = nameEl.textContent.trim();
                                 if (previewEl) messageText = previewEl.textContent.trim();
 
-                                // Extract Avatar URL by looking at the parent container
                                 let parentRow = unreadThread.parentElement;
                                 if (parentRow) {
                                     let imgEl = parentRow.querySelector('img');
                                     if (imgEl && imgEl.src && !imgEl.src.includes('data:')) {
-                                        avatarUrl = imgEl.src;
+                                        // FORCE HTTPS to fix Mixed Content blocking
+                                        avatarUrl = imgEl.src.replace('http://', 'https://');
                                     }
                                 }
                             }
@@ -162,13 +166,14 @@ pub fn run() {
                             console.error("DOM Scrape Error: ", e);
                         }
 
-                        // If we found a URL, download it into a byte array
                         let iconBytesArray = null;
                         if (avatarUrl) {
                             try {
                                 let response = await fetch(avatarUrl);
-                                let arrayBuffer = await response.arrayBuffer();
-                                iconBytesArray = Array.from(new Uint8Array(arrayBuffer));
+                                if (response.ok) {
+                                    let arrayBuffer = await response.arrayBuffer();
+                                    iconBytesArray = Array.from(new Uint8Array(arrayBuffer));
+                                }
                             } catch (e) {
                                 console.error("Avatar fetch error: ", e);
                             }
