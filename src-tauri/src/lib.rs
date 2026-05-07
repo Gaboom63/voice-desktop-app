@@ -36,7 +36,7 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
             .arg("-a")
             .arg("Google Voice")
             .arg("-i")
-            .arg(get_default_icon_path()) // <-- No more "dialog-information"
+            .arg(get_default_icon_path()) 
             .arg("Google Voice")
             .arg(format!("You have {} unread message(s)", count))
             .spawn();
@@ -44,7 +44,12 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
 }
 
 #[tauri::command]
-fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String, icon_bytes: Option<Vec<u8>>) {
+async fn trigger_rich_notification(
+    app: tauri::AppHandle, 
+    title: String, 
+    body: String, 
+    avatar_url: Option<String>
+) -> Result<(), String> {
     // 1. Update the tray icon
     if let Some(tray) = app.tray_by_id("main_tray") {
         let default_icon_bytes = include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice();
@@ -61,17 +66,21 @@ fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String,
         // 2. Default to our custom extracted Google Voice icon
         let mut icon_path = get_default_icon_path(); 
 
-        // 3. If we received avatar bytes from JS, save them to a temp file and override the icon path
-        if let Some(bytes) = icon_bytes {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-                
-            let temp_path = std::env::temp_dir().join(format!("gv_avatar_{}.png", timestamp));
-            
-            if std::fs::write(&temp_path, bytes).is_ok() {
-                icon_path = temp_path.to_string_lossy().into_owned();
+        // 3. If JS gave us a URL, download it natively using reqwest (Bypassing CORS)
+        if let Some(url) = avatar_url {
+            if let Ok(response) = reqwest::get(&url).await {
+                if let Ok(bytes) = response.bytes().await {
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                        
+                    let temp_path = std::env::temp_dir().join(format!("gv_avatar_{}.png", timestamp));
+                    
+                    if std::fs::write(&temp_path, bytes).is_ok() {
+                        icon_path = temp_path.to_string_lossy().into_owned();
+                    }
+                }
             }
         }
 
@@ -85,6 +94,8 @@ fn trigger_rich_notification(app: tauri::AppHandle, title: String, body: String,
             .arg(&body)
             .spawn();
     }
+    
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -166,23 +177,11 @@ pub fn run() {
                             console.error("DOM Scrape Error: ", e);
                         }
 
-                        let iconBytesArray = null;
-                        if (avatarUrl) {
-                            try {
-                                let response = await fetch(avatarUrl);
-                                if (response.ok) {
-                                    let arrayBuffer = await response.arrayBuffer();
-                                    iconBytesArray = Array.from(new Uint8Array(arrayBuffer));
-                                }
-                            } catch (e) {
-                                console.error("Avatar fetch error: ", e);
-                            }
-                        }
-
+                        // Send the URL directly to Rust instead of fetching bytes
                         window.__TAURI_INTERNALS__.invoke("trigger_rich_notification", {
                             title: senderName,
                             body: messageText,
-                            icon_bytes: iconBytesArray
+                            avatarUrl: avatarUrl
                         });
 
                         window.__TAURI_INTERNALS__.invoke("update_status", { 
