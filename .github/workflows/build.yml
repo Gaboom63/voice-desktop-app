@@ -1,15 +1,24 @@
-name: Build Desktop App
+name: Build Cross-Platform Desktop App
 on:
   push:
     branches:
       - main
-  workflow_dispatch: # Allows you to manually trigger the build from the Actions tab
+  workflow_dispatch:
 
 jobs:
-  build:
+  build-tauri:
     permissions:
       contents: write
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'ubuntu-22.04'
+            args: ''
+          - platform: 'windows-latest'
+            args: '--target x86_64-pc-windows-msvc'
+
+    runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -17,7 +26,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: '22'
           cache: 'npm'
 
       - name: Install Rust Toolchain
@@ -28,7 +37,8 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - name: Install System Dependencies
+      - name: Install System Dependencies (Linux Only)
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -46,16 +56,20 @@ jobs:
       - name: Install Frontend Dependencies
         run: npm install
 
-      - name: Create Dummy Frontend
+      - name: Create Dummy Frontend (Cross-Platform)
+        shell: bash
         run: |
           mkdir -p dist
           touch dist/index.html
 
-      - name: Build and Release
+      - name: Build and Release Tauri App
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: v__VERSION__
-          releaseName: "Release v__VERSION__"
-          releaseBody: "Automated build for Debian/ChromeOS (GLIBC 2.35 compatible)"
+          releaseName: "Google Voice Desktop v__VERSION__"
+          releaseBody: "Automated cross-platform build."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
