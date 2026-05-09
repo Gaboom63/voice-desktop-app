@@ -8,7 +8,6 @@ use tauri_plugin_notification::NotificationExt;
 // Helper function to extract our embedded icon to disk so notify-send can use it
 fn get_default_icon_path() -> String {
     let path = std::env::temp_dir().join("gv_default_notify_icon.png");
-    // Write the embedded icon to /tmp/ silently
     let _ = std::fs::write(&path, include_bytes!("../icons/Google-Voice-Notifcation-Icon.png"));
     path.to_string_lossy().into_owned()
 }
@@ -40,6 +39,13 @@ fn update_status(app: tauri::AppHandle, count: i32, notify: bool) {
             .arg("Google Voice")
             .arg(format!("You have {} unread message(s)", count))
             .spawn();
+
+        #[cfg(target_os = "windows")]
+        let _ = app.notification()
+            .builder()
+            .title("Google Voice")
+            .body(format!("You have {} unread message(s)", count))
+            .show();
     }
 }
 
@@ -50,7 +56,7 @@ async fn trigger_rich_notification(
     body: String, 
     avatar_url: Option<String>
 ) -> Result<(), String> {
-    // 1. Update the tray icon
+    // 1. Update the tray icon natively (Works cross-platform)
     if let Some(tray) = app.tray_by_id("main_tray") {
         let default_icon_bytes = include_bytes!("../icons/Google-Voice-Notifcation-Icon.png").as_slice();
         if let Ok(img) = image::load_from_memory(default_icon_bytes) {
@@ -61,12 +67,11 @@ async fn trigger_rich_notification(
         }
     }
 
+    // 2. Linux Rich Notification (With custom downloaded avatars)
     #[cfg(target_os = "linux")]
     {
-        // 2. Default to our custom extracted Google Voice icon
         let mut icon_path = get_default_icon_path(); 
 
-        // 3. If JS gave us a URL, download it natively using reqwest (Bypassing CORS)
         if let Some(url) = avatar_url {
             if let Ok(response) = reqwest::get(&url).await {
                 if let Ok(bytes) = response.bytes().await {
@@ -84,7 +89,6 @@ async fn trigger_rich_notification(
             }
         }
 
-        // 4. Fire the notification
         let _ = std::process::Command::new("notify-send")
             .arg("-a")
             .arg("Google Voice")
@@ -93,6 +97,16 @@ async fn trigger_rich_notification(
             .arg(&title)
             .arg(&body)
             .spawn();
+    }
+
+    // 3. Windows Native Notification
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app.notification()
+            .builder()
+            .title(&title)
+            .body(&body)
+            .show();
     }
     
     Ok(())
@@ -148,7 +162,9 @@ pub fn run() {
                     let match = document.title.match(/\((\d+)\)/);
                     let count = match ? parseInt(match[1]) : 0;
                     
-                    if (count > lastCount) {
+                    let delta = count - lastCount;
+                    
+                    if (delta > 0) {
                         let senderName = "Google Voice";
                         let messageText = "You have a new message.";
                         let avatarUrl = null;
@@ -168,7 +184,6 @@ pub fn run() {
                                 if (parentRow) {
                                     let imgEl = parentRow.querySelector('img');
                                     if (imgEl && imgEl.src && !imgEl.src.includes('data:')) {
-                                        // FORCE HTTPS to fix Mixed Content blocking
                                         avatarUrl = imgEl.src.replace('http://', 'https://');
                                     }
                                 }
@@ -177,10 +192,15 @@ pub fn run() {
                             console.error("DOM Scrape Error: ", e);
                         }
 
-                        // Send the URL directly to Rust instead of fetching bytes
+                        // ANTI-SPAM BYPASS: Append the time so the OS doesn't group or drop rapid messages
+                        let timeString = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                        let displayBody = delta > 1 
+                            ? `(${delta} new) ${messageText} [${timeString}]` 
+                            : `${messageText} [${timeString}]`;
+
                         window.__TAURI_INTERNALS__.invoke("trigger_rich_notification", {
                             title: senderName,
-                            body: messageText,
+                            body: displayBody,
                             avatarUrl: avatarUrl
                         });
 
