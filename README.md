@@ -1,7 +1,2 @@
-# Tauri + Vanilla
-
-This template should help get you started developing with Tauri in vanilla HTML, CSS and Javascript.
-
-## Recommended IDE Setup
-
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+<h1>Hi! Thanks For Using My Google Voice Client! :) </h1>
+<p align="center">If you are experiencing any issues with this, please make an issue! I'd love to fix them for you! I know for some, Google Voice is the only way that they can message others, especially those without phones. So if you are having an issue please please please make an issue and let me fix it for you! :)</p>
